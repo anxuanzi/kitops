@@ -40,5 +40,5 @@ func PushModel(ctx context.Context, localRepo local.LocalRepo, repo registry.Rep
 	}
 	logger.Wait()
 
-	return desc, err
+	return desc, nil
 }
