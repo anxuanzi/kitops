@@ -239,40 +239,10 @@ func (l *localRepo) PullModel(ctx context.Context, src oras.ReadOnlyTarget, ref 
 	toPull := []ocispec.Descriptor{manifest.Config}
 	toPull = append(toPull, manifest.Layers...)
 	toPull = append(toPull, desc)
-	sem := semaphore.NewWeighted(int64(opts.Concurrency))
-	errs, errCtx := errgroup.WithContext(ctx)
-	fmtErr := func(desc ocispec.Descriptor, err error) error {
-		if err == nil {
-			return nil
-		}
-		return fmt.Errorf("failed to get %s layer: %w", constants.FormatMediaTypeForUser(desc.MediaType), err)
-	}
-	var semErr error
-	// In some cases, manifests can contain duplicate digests. If we try to concurrently pull the same digest
-	// twice, a race condition will cause the pull the fail.
-	pulledDigests := map[string]bool{}
-	for _, pullDesc := range toPull {
-		pullDesc := pullDesc
-		digest := pullDesc.Digest.String()
-		if pulledDigests[digest] {
-			continue
-		}
-		pulledDigests[digest] = true
-		if err := sem.Acquire(errCtx, 1); err != nil {
-			// Save error and break to get the _actual_ error
-			semErr = err
-			break
-		}
-		errs.Go(func() error {
-			defer sem.Release(1)
-			return fmtErr(pullDesc, l.pullNode(errCtx, src, pullDesc, progress, config))
-		})
-	}
-	if err := errs.Wait(); err != nil {
+
+	// Implement adaptive concurrency: separate files by size for optimal resource utilization
+	if err := l.pullWithAdaptiveConcurrency(ctx, src, toPull, progress, config, opts.Concurrency); err != nil {
 		return ocispec.DescriptorEmptyJSON, err
-	}
-	if semErr != nil {
-		return ocispec.DescriptorEmptyJSON, fmt.Errorf("failed to acquire lock: %w", semErr)
 	}
 
 	// Special handling to make sure local (scoped) repo contains the just-pulled manifest
@@ -296,6 +266,91 @@ func (l *localRepo) PullModel(ctx context.Context, src oras.ReadOnlyTarget, ref 
 	}
 
 	return desc, nil
+}
+
+// pullWithAdaptiveConcurrency implements adaptive concurrency strategy:
+// - Large files are downloaded sequentially to maximize bandwidth utilization per file
+// - Small files are downloaded concurrently for better overall throughput
+func (l *localRepo) pullWithAdaptiveConcurrency(ctx context.Context, src oras.ReadOnlyTarget, toPull []ocispec.Descriptor, progress *output.PullProgress, config downloadConfig, maxConcurrency int) error {
+	// Separate files into small and large groups based on largeLayerThreshold
+	var smallFiles, largeFiles []ocispec.Descriptor
+
+	// Remove duplicates first to avoid race conditions
+	pulledDigests := map[string]bool{}
+	uniqueFiles := make([]ocispec.Descriptor, 0, len(toPull))
+	for _, desc := range toPull {
+		digest := desc.Digest.String()
+		if !pulledDigests[digest] {
+			pulledDigests[digest] = true
+			uniqueFiles = append(uniqueFiles, desc)
+		}
+	}
+
+	// Categorize files by size
+	for _, desc := range uniqueFiles {
+		if desc.Size > config.largeLayerThreshold {
+			largeFiles = append(largeFiles, desc)
+		} else {
+			smallFiles = append(smallFiles, desc)
+		}
+	}
+
+	progress.Logf(output.LogLevelDebug, "Adaptive concurrency: %d large files (sequential), %d small files (concurrent=%d)",
+		len(largeFiles), len(smallFiles), maxConcurrency)
+
+	// Initialize all layer progress bars upfront (Docker CLI-like behavior)
+	progress.InitializeLayers(uniqueFiles)
+
+	// Create error group for coordinating all downloads
+	errs, errCtx := errgroup.WithContext(ctx)
+
+	fmtErr := func(desc ocispec.Descriptor, err error) error {
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf("failed to get %s layer: %w", constants.FormatMediaTypeForUser(desc.MediaType), err)
+	}
+
+	// Process large files sequentially (concurrency = 1) to maximize bandwidth per file
+	// This ensures each large file gets full network bandwidth utilization
+	if len(largeFiles) > 0 {
+		errs.Go(func() error {
+			progress.Logf(output.LogLevelDebug, "Processing %d large files sequentially", len(largeFiles))
+			for _, desc := range largeFiles {
+				desc := desc // capture loop variable
+				if err := l.pullNode(errCtx, src, desc, progress, config); err != nil {
+					return fmtErr(desc, err)
+				}
+			}
+			return nil
+		})
+	}
+
+	// Process small files concurrently for better throughput
+	// Small files benefit from concurrent processing as they don't saturate bandwidth individually
+	if len(smallFiles) > 0 {
+		errs.Go(func() error {
+			progress.Logf(output.LogLevelDebug, "Processing %d small files with concurrency=%d", len(smallFiles), maxConcurrency)
+
+			sem := semaphore.NewWeighted(int64(maxConcurrency))
+			smallErrs, smallCtx := errgroup.WithContext(errCtx)
+
+			for _, desc := range smallFiles {
+				desc := desc // capture loop variable
+				if err := sem.Acquire(smallCtx, 1); err != nil {
+					return err
+				}
+				smallErrs.Go(func() error {
+					defer sem.Release(1)
+					return fmtErr(desc, l.pullNode(smallCtx, src, desc, progress, config))
+				})
+			}
+
+			return smallErrs.Wait()
+		})
+	}
+
+	return errs.Wait()
 }
 
 func (l *localRepo) pullNode(ctx context.Context, src oras.ReadOnlyTarget, desc ocispec.Descriptor, p *output.PullProgress, config downloadConfig) error {

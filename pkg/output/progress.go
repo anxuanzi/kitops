@@ -215,26 +215,66 @@ func TarProgress(total int64, tw *tar.Writer) (*ProgressTar, *ProgressLogger) {
 type PullProgress struct {
 	progress *mpb.Progress
 	ProgressLogger
+	layerBars map[string]*mpb.Bar // Map from digest to progress bar
+}
+
+// InitializeLayers creates progress bars for all layers upfront, showing "Waiting" status
+// This provides Docker CLI-like behavior where all layers are listed before downloading starts
+func (p *PullProgress) InitializeLayers(layers []ocispec.Descriptor) {
+	if !progressEnabled || p.progress == nil {
+		return
+	}
+
+	for _, desc := range layers {
+		digest := desc.Digest.String()
+		shortDigest := digest[0:8]
+
+		bar := p.progress.New(desc.Size,
+			barStyle(),
+			mpb.PrependDecorators(
+				decor.Name(shortDigest+" Waiting"),
+			),
+			mpb.AppendDecorators(
+				decor.OnComplete(decor.Counters(decor.SizeB1024(0), "% .1f / % .1f"), fmt.Sprintf("%-9s", FormatBytes(desc.Size))),
+				decor.OnComplete(decor.Name(" | "), " | "),
+				decor.OnComplete(decor.AverageSpeed(decor.SizeB1024(0), "% .2f"), "done"),
+			),
+			mpb.BarFillerOnComplete("|"),
+		)
+
+		p.layerBars[digest] = bar
+	}
 }
 
 func (p *PullProgress) ProxyWriter(w io.Writer, digest string, size, offset int64) io.Writer {
 	if !progressEnabled || p.progress == nil {
 		return w
 	}
-	shortDigest := digest[0:8]
 
-	bar := p.progress.New(size,
-		barStyle(),
-		mpb.PrependDecorators(
-			decor.Name("Copying "+shortDigest),
-		),
-		mpb.AppendDecorators(
-			decor.OnComplete(decor.Counters(decor.SizeB1024(0), "% .1f / % .1f"), fmt.Sprintf("%-9s", FormatBytes(size))),
-			decor.OnComplete(decor.Name(" | "), " | "),
-			decor.OnComplete(decor.AverageSpeed(decor.SizeB1024(0), "% .2f"), "done"),
-		),
-		mpb.BarFillerOnComplete("|"),
-	)
+	// Use pre-created bar if it exists, otherwise create a new one (fallback)
+	bar, exists := p.layerBars[digest]
+	if !exists {
+		shortDigest := digest[0:8]
+		bar = p.progress.New(size,
+			barStyle(),
+			mpb.PrependDecorators(
+				decor.Name("Copying "+shortDigest),
+			),
+			mpb.AppendDecorators(
+				decor.OnComplete(decor.Counters(decor.SizeB1024(0), "% .1f / % .1f"), fmt.Sprintf("%-9s", FormatBytes(size))),
+				decor.OnComplete(decor.Name(" | "), " | "),
+				decor.OnComplete(decor.AverageSpeed(decor.SizeB1024(0), "% .2f"), "done"),
+			),
+			mpb.BarFillerOnComplete("|"),
+		)
+		p.layerBars[digest] = bar
+	} else {
+		// Update the bar priority to show it's now downloading
+		bar.SetPriority(1) // Move downloading bars to top
+		// Note: mpb doesn't easily allow changing decorators after creation,
+		// but the progress will show the download is active
+	}
+
 	bar.IncrInt64(offset)
 	return bar.ProxyWriter(w)
 }
@@ -249,6 +289,7 @@ func NewPullProgress(ctx context.Context) *PullProgress {
 	if !progressEnabled {
 		return &PullProgress{
 			ProgressLogger: ProgressLogger{stdout},
+			layerBars:      make(map[string]*mpb.Bar),
 		}
 	}
 	p := mpb.NewWithContext(ctx,
@@ -258,6 +299,7 @@ func NewPullProgress(ctx context.Context) *PullProgress {
 	return &PullProgress{
 		progress:       p,
 		ProgressLogger: ProgressLogger{p},
+		layerBars:      make(map[string]*mpb.Bar),
 	}
 }
 
