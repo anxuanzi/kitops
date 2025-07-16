@@ -46,6 +46,7 @@ type LocalRepo interface {
 	GetAllModels() []ocispec.Descriptor
 	GetTags(ocispec.Descriptor) []string
 	PullModel(context.Context, oras.ReadOnlyTarget, registry.Reference, *options.NetworkOptions) (ocispec.Descriptor, error)
+	PushModel(context.Context, oras.Target, registry.Reference, *options.NetworkOptions) (ocispec.Descriptor, error)
 	EnsureDirs(ocispec.Descriptor) error
 	oras.Target
 	content.Deleter
