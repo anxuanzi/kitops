@@ -46,7 +46,7 @@ type uploadConfig struct {
 }
 
 // determineOptimalUploadConfig dynamically determines optimal upload parameters
-// based on available system resources (similar to download config)
+// based on available system resources - Enhanced for high-end GPU machines
 func determineOptimalUploadConfig() uploadConfig {
 	cpus := runtime.NumCPU()
 	mem := getSystemMemory()
@@ -55,29 +55,41 @@ func determineOptimalUploadConfig() uploadConfig {
 		adaptiveBufferEnabled: true,
 	}
 
-	// Buffer size: Scale with available memory (0.1% of RAM, with min/max bounds)
-	memoryFraction := mem / 1000         // 0.1% of total memory
-	minBuffer := int64(1 * 1024 * 1024)  // 1 MB minimum
-	maxBuffer := int64(16 * 1024 * 1024) // 16 MB maximum
+	// Buffer size: Enhanced scaling for high-end GPU machines
+	// Scale with available memory (0.1% of RAM, with enhanced bounds for GPU machines)
+	memoryFraction := mem / 1000        // 0.1% of total memory
+	minBuffer := int64(1 * 1024 * 1024) // 1 MB minimum
+	// Increased max buffer for high bandwidth networks (up to 256MB for GPU machines)
+	maxBuffer := int64(256 * 1024 * 1024)
+	if mem < 64*1024*1024*1024 { // Less than 64GB
+		maxBuffer = int64(16 * 1024 * 1024) // 16MB for smaller systems
+	}
 
 	config.copyBufferSize = int(clampInt64(memoryFraction, minBuffer, maxBuffer))
 
-	// Large layer threshold: Files above this size use chunked uploads
-	config.largeLayerThreshold = clampInt64(mem/200, 10*1024*1024, 100*1024*1024) // 0.5% of RAM, 10MB-100MB range
+	// Large layer threshold: Enhanced for GPU machines with massive RAM
+	// Scale with memory but allow much larger thresholds for high-end systems
+	config.largeLayerThreshold = clampInt64(mem/200, 10*1024*1024, 1024*1024*1024) // 0.5% of RAM, 10MB-1GB range
 
-	// Chunk size: Scale with memory and CPUs
-	basedOnMemory := mem / 100                                                                       // 1% of RAM per chunk
-	basedOnCPUs := int64(16 * 1024 * 1024 * cpus)                                                    // Scale with CPU count
-	config.chunkSize = clampInt64(minInt64(basedOnMemory, basedOnCPUs), 10*1024*1024, 200*1024*1024) // 10MB-200MB range
+	// Chunk size: Enhanced scaling for high-end GPU machines
+	// Larger chunks for better performance on high bandwidth networks
+	basedOnMemory := mem / 50                                                                           // 2% of RAM per chunk (increased from 1%)
+	basedOnCPUs := int64(32 * 1024 * 1024 * cpus)                                                       // Increased base chunk size
+	config.chunkSize = clampInt64(minInt64(basedOnMemory, basedOnCPUs), 10*1024*1024, 2*1024*1024*1024) // 10MB-2GB range
 
-	// Chunk concurrency: Scale with CPUs and memory
-	memoryBasedConcurrency := mem / (200 * 1024 * 1024) // Assume each upload might use up to 200MB
-	cpuBasedConcurrency := int64(cpus * 4)              // 4 chunks per CPU is reasonable for I/O bound tasks
-	config.chunkConcurrency = clampInt64(maxInt64(memoryBasedConcurrency, cpuBasedConcurrency), 4, 32)
+	// Chunk concurrency: Enhanced scaling for 100+ CPU cores
+	// More aggressive scaling for high-end GPU machines
+	memoryBasedConcurrency := mem / (100 * 1024 * 1024) // Reduced memory assumption per chunk
+	cpuBasedConcurrency := int64(cpus * 8)              // Increased to 8 chunks per CPU for GPU machines
+	// Removed the 32 cap - allow up to 512 for extreme configurations
+	config.chunkConcurrency = clampInt64(maxInt64(memoryBasedConcurrency, cpuBasedConcurrency), 4, 512)
 
-	// Layer concurrency: How many files to upload in parallel
-	memoryBasedLayerConcurrency := int(mem / (1024 * 1024 * 1024)) // Assume 1GB per layer
-	config.layerConcurrency = clampInt(maxInt(memoryBasedLayerConcurrency, cpus*2), 4, 16)
+	// Layer concurrency: Enhanced for 100+ CPU cores and massive RAM
+	// More aggressive scaling for high-end GPU machines
+	memoryBasedLayerConcurrency := int(mem / (512 * 1024 * 1024)) // Reduced memory assumption per layer
+	cpuBasedLayerConcurrency := cpus * 4                          // Scale more aggressively with CPU count
+	// Removed the 16 cap - allow up to 256 for extreme configurations
+	config.layerConcurrency = clampInt(maxInt(memoryBasedLayerConcurrency, cpuBasedLayerConcurrency), 4, 256)
 
 	return config
 }

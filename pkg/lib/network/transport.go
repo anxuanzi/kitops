@@ -94,6 +94,7 @@ func GetOptimizedHTTPClient(tlsConfig *tls.Config) *http.Client {
 }
 
 // AdaptiveConnectionLimits adjusts connection limits based on system resources
+// Enhanced for high-end GPU machines with 100+ CPU cores and high bandwidth networks
 func AdaptiveConnectionLimits() (maxIdleConns, maxIdleConnsPerHost, maxConnsPerHost int) {
 	cpus := runtime.NumCPU()
 
@@ -102,18 +103,31 @@ func AdaptiveConnectionLimits() (maxIdleConns, maxIdleConnsPerHost, maxConnsPerH
 	maxIdleConnsPerHost = 10
 	maxConnsPerHost = 0 // Unlimited
 
-	// Scale based on CPU count for better performance on multi-core systems
+	// Enhanced scaling for high-end GPU machines with 100+ CPU cores
 	if cpus > 4 {
-		maxIdleConns = 100 + (cpus-4)*10      // Scale up idle connections
-		maxIdleConnsPerHost = 10 + (cpus-4)*2 // Scale up per-host connections
+		// More aggressive scaling for high-end systems
+		if cpus >= 100 {
+			// For extreme configurations (100+ CPUs), scale much more aggressively
+			maxIdleConns = 1000 + (cpus-100)*5       // Start at 1000 for 100+ CPU systems
+			maxIdleConnsPerHost = 100 + (cpus-100)*2 // Start at 100 per host for 100+ CPU systems
+		} else if cpus >= 32 {
+			// For high-end systems (32-99 CPUs), scale moderately
+			maxIdleConns = 500 + (cpus-32)*10      // Scale up for high-end systems
+			maxIdleConnsPerHost = 50 + (cpus-32)*2 // Scale up per-host connections
+		} else {
+			// For mid-range systems (5-31 CPUs), use original scaling
+			maxIdleConns = 100 + (cpus-4)*10      // Original scaling
+			maxIdleConnsPerHost = 10 + (cpus-4)*2 // Original scaling
+		}
 	}
 
-	// Cap at reasonable limits to avoid resource exhaustion
-	if maxIdleConns > 200 {
-		maxIdleConns = 200
+	// Enhanced caps for high-end GPU machines and high bandwidth networks (2Gbps+)
+	// Remove restrictive caps to allow proper utilization of extreme hardware
+	if maxIdleConns > 2000 {
+		maxIdleConns = 2000 // Cap at 2000 for extreme configurations
 	}
-	if maxIdleConnsPerHost > 20 {
-		maxIdleConnsPerHost = 20
+	if maxIdleConnsPerHost > 200 {
+		maxIdleConnsPerHost = 200 // Cap at 200 per host for extreme configurations
 	}
 
 	return maxIdleConns, maxIdleConnsPerHost, maxConnsPerHost
